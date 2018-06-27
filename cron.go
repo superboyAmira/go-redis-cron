@@ -12,6 +12,10 @@ import (
 	"github.com/garyburd/redigo/redis"
 )
 
+type Logger interface {
+	Printf(format string, v ...interface{})
+}
+
 // Cron keeps track of any number of entries, invoking the associated func as
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
@@ -21,7 +25,7 @@ type Cron struct {
 	add       chan *Entry
 	snapshot  chan []*Entry
 	running   bool
-	ErrorLog  *log.Logger
+	ErrorLog  Logger
 	location  *time.Location
 	conn      redis.Conn
 	keyPrefix string
