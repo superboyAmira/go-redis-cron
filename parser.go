@@ -367,13 +367,13 @@ func parseDescriptor(descriptor string) (Schedule, error) {
 		}, nil
 	}
 
-	const every = "@every "
-	if strings.HasPrefix(descriptor, every) {
-		duration, err := time.ParseDuration(descriptor[len(every):])
+	const everySpec = "@every "
+	if strings.HasPrefix(descriptor, everySpec) {
+		duration, err := time.ParseDuration(descriptor[len(everySpec):])
 		if err != nil {
 			return nil, fmt.Errorf("Failed to parse duration %s: %s", descriptor, err)
 		}
-		return Every(duration), nil
+		return every(duration), nil
 	}
 
 	return nil, fmt.Errorf("Unrecognized descriptor: %s", descriptor)

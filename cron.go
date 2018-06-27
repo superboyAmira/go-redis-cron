@@ -1,28 +1,38 @@
 package cron
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"log"
+	"reflect"
 	"runtime"
 	"sort"
 	"time"
+
+	"github.com/garyburd/redigo/redis"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries  []*Entry
-	stop     chan struct{}
-	add      chan *Entry
-	snapshot chan []*Entry
-	running  bool
-	ErrorLog *log.Logger
-	location *time.Location
+	entries   []*Entry
+	stop      chan struct{}
+	add       chan *Entry
+	snapshot  chan []*Entry
+	running   bool
+	ErrorLog  *log.Logger
+	location  *time.Location
+	conn      redis.Conn
+	keyPrefix string
 }
+
+const DefaultKeyPrefix = "redis-cron"
 
 // Job is an interface for submitted cron jobs.
 type Job interface {
 	Run()
+	Name() string
 }
 
 // The Schedule describes a job's duty cycle.
@@ -47,6 +57,8 @@ type Entry struct {
 
 	// The Job to run.
 	Job Job
+
+	Spec string
 }
 
 // byTime is a wrapper for sorting the entry array by time
@@ -69,20 +81,22 @@ func (s byTime) Less(i, j int) bool {
 }
 
 // New returns a new Cron job runner, in the Local time zone.
-func New() *Cron {
-	return NewWithLocation(time.Now().Location())
+func New(conn redis.Conn) *Cron {
+	return NewWithLocation(time.Now().Location(), conn)
 }
 
 // NewWithLocation returns a new Cron job runner.
-func NewWithLocation(location *time.Location) *Cron {
+func NewWithLocation(location *time.Location, conn redis.Conn) *Cron {
 	return &Cron{
-		entries:  nil,
-		add:      make(chan *Entry),
-		stop:     make(chan struct{}),
-		snapshot: make(chan []*Entry),
-		running:  false,
-		ErrorLog: nil,
-		location: location,
+		entries:   nil,
+		add:       make(chan *Entry),
+		stop:      make(chan struct{}),
+		snapshot:  make(chan []*Entry),
+		running:   false,
+		ErrorLog:  nil,
+		location:  location,
+		conn:      conn,
+		keyPrefix: DefaultKeyPrefix,
 	}
 }
 
@@ -90,6 +104,15 @@ func NewWithLocation(location *time.Location) *Cron {
 type FuncJob func()
 
 func (f FuncJob) Run() { f() }
+
+func (f FuncJob) Name() string {
+	return runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
+}
+
+// SetKeyPrefix prepend a prefix to the key.
+func (c *Cron) SetKeyPrefix(prefix string) {
+	c.keyPrefix = prefix
+}
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
 func (c *Cron) AddFunc(spec string, cmd func()) error {
@@ -102,15 +125,16 @@ func (c *Cron) AddJob(spec string, cmd Job) error {
 	if err != nil {
 		return err
 	}
-	c.Schedule(schedule, cmd)
+	c.schedule(schedule, cmd, spec)
 	return nil
 }
 
-// Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job) {
+// schedule adds a Job to the Cron to be run on the given schedule.
+func (c *Cron) schedule(schedule Schedule, cmd Job, spec string) {
 	entry := &Entry{
 		Schedule: schedule,
 		Job:      cmd,
+		Spec:     spec,
 	}
 	if !c.running {
 		c.entries = append(c.entries, entry)
@@ -151,6 +175,28 @@ func (c *Cron) Run() {
 	}
 	c.running = true
 	c.run()
+}
+
+func (c *Cron) lock(start time.Time, entry *Entry) bool {
+	key := c.constructKey(entry)
+	expireAfter := c.calcExpiry(start, entry.Schedule.Next(start))
+	reply, err := redis.String(c.conn.Do("SET", key, "NX", "PX", expireAfter))
+	return reply == "OK" && err == nil
+}
+
+// in millisecond
+func (c *Cron) calcExpiry(now time.Time, next time.Time) int64 {
+	nowUnix := now.UnixNano()
+	nextUnix := next.In(c.Location()).UnixNano()
+	expiry := ((nextUnix - nowUnix) / 2) / 1e6
+	return expiry
+}
+
+func (c *Cron) constructKey(entry *Entry) string {
+	h := sha1.New()
+	h.Write([]byte(c.keyPrefix + entry.Job.Name() + entry.Spec))
+	key := hex.EncodeToString(h.Sum(nil))
+	return key
 }
 
 func (c *Cron) runWithRecovery(j Job) {
@@ -194,6 +240,9 @@ func (c *Cron) run() {
 				// Run every entry whose next time was less than now
 				for _, e := range c.entries {
 					if e.Next.After(now) || e.Next.IsZero() {
+						break
+					}
+					if !c.lock(now, e) {
 						break
 					}
 					go c.runWithRecovery(e.Job)
