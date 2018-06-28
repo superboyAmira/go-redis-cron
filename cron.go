@@ -9,6 +9,8 @@ import (
 	"sort"
 	"time"
 
+	"strings"
+
 	"github.com/gomodule/redigo/redis"
 )
 
@@ -217,6 +219,9 @@ func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
 	}()
 	locked, err := c.lock(start, next, e)
 	if err != nil || !locked {
+		if !strings.Contains(err.Error(), "nil returned") {
+			panic(err)
+		}
 		return
 	}
 	e.Job.Run()
