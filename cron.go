@@ -216,10 +216,7 @@ func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
 		}
 	}()
 	locked, err := c.lock(start, next, e)
-	if err != nil {
-		panic(err)
-	}
-	if !locked {
+	if err != nil || !locked {
 		return
 	}
 	e.Job.Run()

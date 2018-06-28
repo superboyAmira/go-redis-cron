@@ -75,7 +75,7 @@ func TestRunningInConcurrency(t *testing.T) {
 	// Give cron 2 seconds to run our job (which is always activated).
 	select {
 	case <-time.After(OneSecond):
-		t.Fatal("expected job runs")
+		t.Fatal("multi same jobs run more than one time")
 	case <-wait(wg):
 	}
 }
