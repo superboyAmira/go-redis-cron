@@ -65,14 +65,12 @@ func TestRunningInConcurrency(t *testing.T) {
 	wg.Add(1)
 
 	cron := New(pool)
-	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
-	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
-	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
-	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
+	for i := 0; i < 100; i++ {
+		cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
+	}
 	cron.Start()
 	defer cron.Stop()
 
-	// Give cron 2 seconds to run our job (which is always activated).
 	select {
 	case <-time.After(OneSecond):
 		t.Fatal("multi same jobs run more than one time")
