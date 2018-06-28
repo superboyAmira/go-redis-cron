@@ -6,7 +6,7 @@ Usage
 Callers may register Funcs to be invoked on a given schedule.  Cron will run
 them in their own goroutines.
 
-	c := cron.New(redic.Conn)
+	c := cron.New(*redis.Pool)
 	c.AddFunc("0 30 * * * *", func() { fmt.Println("Every hour on the half hour") })
 	c.AddFunc("@hourly",      func() { fmt.Println("Every hour") })
 	c.AddFunc("@every 1h30m", func() { fmt.Println("Every hour thirty") })
