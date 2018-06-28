@@ -278,6 +278,8 @@ func (c *Cron) run() {
 
 			break
 		}
+
+		timer.Stop()
 	}
 }
 
