@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/garyburd/redigo/redis"
+	"github.com/gomodule/redigo/redis"
 )
 
 type Logger interface {
@@ -27,7 +27,7 @@ type Cron struct {
 	running   bool
 	ErrorLog  Logger
 	location  *time.Location
-	conn      redis.Conn
+	pool      *redis.Pool
 	keyPrefix string
 }
 
@@ -62,6 +62,7 @@ type Entry struct {
 	// The Job to run.
 	Job Job
 
+	// Example: "* 00 * * * *"
 	Spec string
 }
 
@@ -85,12 +86,12 @@ func (s byTime) Less(i, j int) bool {
 }
 
 // New returns a new Cron job runner, in the Local time zone.
-func New(conn redis.Conn) *Cron {
-	return NewWithLocation(time.Now().Location(), conn)
+func New(pool *redis.Pool) *Cron {
+	return NewWithLocation(time.Now().Location(), pool)
 }
 
 // NewWithLocation returns a new Cron job runner.
-func NewWithLocation(location *time.Location, conn redis.Conn) *Cron {
+func NewWithLocation(location *time.Location, pool *redis.Pool) *Cron {
 	return &Cron{
 		entries:   nil,
 		add:       make(chan *Entry),
@@ -99,7 +100,7 @@ func NewWithLocation(location *time.Location, conn redis.Conn) *Cron {
 		running:   false,
 		ErrorLog:  nil,
 		location:  location,
-		conn:      conn,
+		pool:      pool,
 		keyPrefix: DefaultKeyPrefix,
 	}
 }
@@ -181,17 +182,19 @@ func (c *Cron) Run() {
 	c.run()
 }
 
-func (c *Cron) lock(start time.Time, entry *Entry) bool {
+func (c *Cron) lock(start time.Time, next time.Time, entry *Entry) (bool, error) {
 	key := c.constructKey(entry)
-	expireAfter := c.calcExpiry(start, entry.Schedule.Next(start))
-	reply, err := redis.String(c.conn.Do("SET", key, "NX", "PX", expireAfter))
-	return reply == "OK" && err == nil
+	expireAfter := c.calcExpiry(start.In(c.location), next.In(c.location))
+	conn := c.pool.Get()
+	defer conn.Close()
+	reply, err := redis.String(conn.Do("SET", key, "NX", "PX", int(expireAfter)))
+	return reply == "OK" && err == nil, err
 }
 
 // in millisecond
 func (c *Cron) calcExpiry(now time.Time, next time.Time) int64 {
 	nowUnix := now.UnixNano()
-	nextUnix := next.In(c.Location()).UnixNano()
+	nextUnix := next.UnixNano()
 	expiry := ((nextUnix - nowUnix) / 2) / 1e6
 	return expiry
 }
@@ -203,7 +206,7 @@ func (c *Cron) constructKey(entry *Entry) string {
 	return key
 }
 
-func (c *Cron) runWithRecovery(j Job) {
+func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
 	defer func() {
 		if r := recover(); r != nil {
 			const size = 64 << 10
@@ -212,7 +215,14 @@ func (c *Cron) runWithRecovery(j Job) {
 			c.logf("cron: panic running job: %v\n%s", r, buf)
 		}
 	}()
-	j.Run()
+	locked, err := c.lock(start, next, e)
+	if err != nil {
+		panic(err)
+	}
+	if !locked {
+		return
+	}
+	e.Job.Run()
 }
 
 // Run the scheduler. this is private just due to the need to synchronize
@@ -246,12 +256,9 @@ func (c *Cron) run() {
 					if e.Next.After(now) || e.Next.IsZero() {
 						break
 					}
-					if !c.lock(now, e) {
-						break
-					}
-					go c.runWithRecovery(e.Job)
 					e.Prev = e.Next
 					e.Next = e.Schedule.Next(now)
+					go c.runWithRecovery(e, now, e.Next)
 				}
 
 			case newEntry := <-c.add:

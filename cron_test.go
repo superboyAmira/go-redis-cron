@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis"
-	"github.com/garyburd/redigo/redis"
+	"os"
+
+	"github.com/gomodule/redigo/redis"
 )
 
 // Many tests schedule a job for every second, and then wait at most a second
@@ -15,11 +16,26 @@ import (
 // compensate for a few milliseconds of runtime.
 const OneSecond = 1*time.Second + 10*time.Millisecond
 
-var redServer, _ = miniredis.Run()
-var redConn, _ = redis.Dial("tcp", redServer.Addr())
+var pool = redisPool()
+
+func redisPool() *redis.Pool {
+	redisAddr := ":6379"
+	if v, ok := os.LookupEnv("REDIS_ADDR"); ok {
+		redisAddr = v
+	}
+	p := &redis.Pool{
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", redisAddr)
+		},
+		MaxIdle:     1,
+		MaxActive:   10,
+		IdleTimeout: 10 * time.Second,
+	}
+	return p
+}
 
 func TestFuncPanicRecovery(t *testing.T) {
-	cron := New(redConn)
+	cron := New(pool)
 	cron.Start()
 	defer cron.Stop()
 	cron.AddFunc("* * * * * ?", func() { panic("YOLO") })
@@ -31,7 +47,7 @@ func TestFuncPanicRecovery(t *testing.T) {
 }
 
 func TestCalcExpiry(t *testing.T) {
-	cron := New(redConn)
+	cron := New(pool)
 	now := cron.now()
 	next := now.Add(time.Second)
 	expiry := cron.calcExpiry(now, next)
@@ -53,7 +69,7 @@ func (d DummyJob) Name() string {
 func TestJobPanicRecovery(t *testing.T) {
 	var job DummyJob
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.Start()
 	defer cron.Stop()
 	cron.AddJob("* * * * * ?", job)
@@ -66,7 +82,7 @@ func TestJobPanicRecovery(t *testing.T) {
 
 // Start and stop cron with no entries.
 func TestNoEntries(t *testing.T) {
-	cron := New(redConn)
+	cron := New(pool)
 	cron.Start()
 
 	select {
@@ -81,7 +97,7 @@ func TestStopCausesJobsToNotRun(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.Start()
 	cron.Stop()
 	cron.AddFunc("* * * * * ?", func() { wg.Done() })
@@ -99,7 +115,7 @@ func TestAddBeforeRunning(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc("* * * * * ?", func() { wg.Done() })
 	cron.Start()
 	defer cron.Stop()
@@ -117,7 +133,7 @@ func TestAddWhileRunning(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.Start()
 	defer cron.Stop()
 	cron.AddFunc("* * * * * ?", func() { wg.Done() })
@@ -131,7 +147,7 @@ func TestAddWhileRunning(t *testing.T) {
 
 // Test for #34. Adding a job after calling start results in multiple job invocations
 func TestAddWhileRunningWithDelay(t *testing.T) {
-	cron := New(redConn)
+	cron := New(pool)
 	cron.Start()
 	defer cron.Stop()
 	time.Sleep(5 * time.Second)
@@ -149,7 +165,7 @@ func TestSnapshotEntries(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc("@every 2s", func() { wg.Done() })
 	cron.Start()
 	defer cron.Stop()
@@ -177,7 +193,7 @@ func TestMultipleEntries(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc("0 0 0 1 1 ?", func() {})
 	cron.AddFunc("* * * * * ?", func() { wg.Done() })
 	cron.AddFunc("0 0 0 31 12 ?", func() {})
@@ -198,7 +214,7 @@ func TestRunningJobTwice(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc("0 0 0 1 1 ?", func() {})
 	cron.AddFunc("0 0 0 31 12 ?", func() {})
 	cron.AddFunc("* * * * * ?", func() { wg.Done() })
@@ -217,10 +233,13 @@ func TestRunningMultipleSchedules(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc("0 0 0 1 1 ?", func() {})
 	cron.AddFunc("0 0 0 31 12 ?", func() {})
 	cron.AddFunc("* * * * * ?", func() { wg.Done() })
+	cron.schedule(every(time.Minute), FuncJob(func() {}), "00 */1 * * * *")
+	cron.schedule(every(time.Second), FuncJob(func() { wg.Done() }), "* * * * * *")
+	cron.schedule(every(time.Hour), FuncJob(func() {}), "00 00 */1 * * *")
 
 	cron.Start()
 	defer cron.Stop()
@@ -241,7 +260,7 @@ func TestLocalTimezone(t *testing.T) {
 	spec := fmt.Sprintf("%d,%d %d %d %d %d ?",
 		now.Second()+1, now.Second()+2, now.Minute(), now.Hour(), now.Day(), now.Month())
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc(spec, func() { wg.Done() })
 	cron.Start()
 	defer cron.Stop()
@@ -268,7 +287,7 @@ func TestNonLocalTimezone(t *testing.T) {
 	spec := fmt.Sprintf("%d,%d %d %d %d %d ?",
 		now.Second()+1, now.Second()+2, now.Minute(), now.Hour(), now.Day(), now.Month())
 
-	cron := NewWithLocation(loc, redConn)
+	cron := NewWithLocation(loc, pool)
 	cron.AddFunc(spec, func() { wg.Done() })
 	cron.Start()
 	defer cron.Stop()
@@ -283,7 +302,7 @@ func TestNonLocalTimezone(t *testing.T) {
 // Test that calling stop before start silently returns without
 // blocking the stop channel.
 func TestStopWithoutStart(t *testing.T) {
-	cron := New(redConn)
+	cron := New(pool)
 	cron.Stop()
 }
 
@@ -302,7 +321,7 @@ func (t testJob) Name() string {
 
 // Test that adding an invalid job spec returns an error
 func TestInvalidJobSpec(t *testing.T) {
-	cron := New(redConn)
+	cron := New(pool)
 	err := cron.AddJob("this will not parse", nil)
 	if err == nil {
 		t.Errorf("expected an error with invalid spec, got nil")
@@ -314,7 +333,7 @@ func TestBlockingRun(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc("* * * * * ?", func() { wg.Done() })
 
 	var unblockChan = make(chan struct{})
@@ -338,7 +357,7 @@ func TestBlockingRun(t *testing.T) {
 func TestStartNoop(t *testing.T) {
 	var tickChan = make(chan struct{}, 2)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddFunc("* * * * * ?", func() {
 		tickChan <- struct{}{}
 	})
@@ -366,11 +385,13 @@ func TestJob(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 
-	cron := New(redConn)
+	cron := New(pool)
 	cron.AddJob("0 0 0 30 Feb ?", testJob{wg, "job0"})
 	cron.AddJob("0 0 0 1 1 ?", testJob{wg, "job1"})
 	cron.AddJob("* * * * * ?", testJob{wg, "job2"})
 	cron.AddJob("1 0 0 1 1 ?", testJob{wg, "job3"})
+	cron.schedule(every(5*time.Second+5*time.Nanosecond), testJob{wg, "job4"}, "*/5 * * * * *")
+	cron.schedule(every(5*time.Minute), testJob{wg, "job5"}, "00 */5 * * * *")
 
 	cron.Start()
 	defer cron.Stop()
@@ -382,7 +403,7 @@ func TestJob(t *testing.T) {
 	}
 
 	// Ensure the entries are in the right order.
-	expecteds := []string{"job2", "job1", "job3", "job0"}
+	expecteds := []string{"job2", "job4", "job5", "job1", "job3", "job0"}
 
 	var actuals []string
 	for _, entry := range cron.Entries() {
@@ -404,7 +425,7 @@ func (*ZeroSchedule) Next(time.Time) time.Time {
 
 // Tests that job without time does not run
 func TestJobWithZeroTimeDoesNotRun(t *testing.T) {
-	cron := New(redConn)
+	cron := New(pool)
 	calls := 0
 	cron.AddFunc("* * * * * *", func() { calls += 1 })
 	cron.schedule(new(ZeroSchedule), FuncJob(func() { t.Error("expected zero task will not run") }), "1 * * * * *")
