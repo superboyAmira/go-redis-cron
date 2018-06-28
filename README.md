@@ -9,5 +9,8 @@ A cron library for go, support redis to execute only one same job in multi insta
 # Install 
 `go get github.com/lovego/redis-cron`
 
+# Test
+`REDIS_ADDR=<redis address> go test`
+
 # Docs
 https://godoc.org/github.com/lovego/redis-cron
