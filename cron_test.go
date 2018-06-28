@@ -30,6 +30,7 @@ func redisPool() *redis.Pool {
 		MaxIdle:     1,
 		MaxActive:   10,
 		IdleTimeout: 10 * time.Second,
+		Wait:        true,
 	}
 	return p
 }
@@ -43,6 +44,39 @@ func TestFuncPanicRecovery(t *testing.T) {
 	select {
 	case <-time.After(OneSecond):
 		return
+	}
+}
+
+type concurrencyJob struct {
+	name string
+	wg   *sync.WaitGroup
+}
+
+func (c *concurrencyJob) Name() string {
+	return c.name
+}
+
+func (c *concurrencyJob) Run() {
+	c.wg.Done()
+}
+
+func TestRunningInConcurrency(t *testing.T) {
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	cron := New(pool)
+	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
+	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
+	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
+	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestRunningInConcurrency", wg: wg})
+	cron.Start()
+	defer cron.Stop()
+
+	// Give cron 2 seconds to run our job (which is always activated).
+	select {
+	case <-time.After(OneSecond):
+		t.Fatal("expected job runs")
+	case <-wait(wg):
 	}
 }
 
