@@ -187,7 +187,7 @@ func (c *Cron) lock(start time.Time, next time.Time, entry *Entry) (bool, error)
 	expireAfter := c.calcExpiry(start.In(c.location), next.In(c.location))
 	conn := c.pool.Get()
 	defer conn.Close()
-	reply, err := redis.String(conn.Do("SET", key, "true", "NX", "PX", int(expireAfter)))
+	reply, err := redis.String(conn.Do("SET", key, 1, "NX", "PX", int(expireAfter)))
 	return reply == "OK" && err == nil, err
 }
 
