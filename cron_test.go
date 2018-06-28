@@ -71,6 +71,7 @@ func TestRunningInConcurrency(t *testing.T) {
 	cron.Start()
 	defer cron.Stop()
 
+	time.Sleep(time.Second)
 	select {
 	case <-time.After(OneSecond):
 		t.Fatal("multi same jobs run more than one time")
