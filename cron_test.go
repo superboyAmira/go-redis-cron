@@ -60,6 +60,22 @@ func (c *concurrencyJob) Run() {
 	c.wg.Done()
 }
 
+func TestOneJobRunTwice(t *testing.T) {
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+
+	cron := New(pool)
+	cron.AddJob("* * * * * ?", &concurrencyJob{name: "TestOneJobRunTwice", wg: wg})
+	cron.Start()
+	defer cron.Stop()
+
+	select {
+	case <-time.After(2 * OneSecond):
+		t.Fatal("the job did not run twice after 2 seconds.")
+	case <-wait(wg):
+	}
+}
+
 func TestRunningInConcurrency(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
