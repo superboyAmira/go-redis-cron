@@ -8,7 +8,7 @@ import (
 
 	"os"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/garyburd/redigo/redis"
 )
 
 // Many tests schedule a job for every second, and then wait at most a second

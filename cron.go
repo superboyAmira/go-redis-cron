@@ -11,7 +11,7 @@ import (
 
 	"strings"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/garyburd/redigo/redis"
 )
 
 type Logger interface {
