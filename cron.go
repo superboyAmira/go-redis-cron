@@ -10,11 +10,10 @@ import (
 	"time"
 
 	"github.com/garyburd/redigo/redis"
-	"github.com/pkg/errors"
 )
 
 type Logger interface {
-	Printf(format string, v ...interface{})
+	Errorf(format string, v ...interface{})
 }
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -217,10 +216,11 @@ func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
 		}
 	}()
 	locked, err := c.lock(start, next, e)
-	if err != nil || !locked {
-		if err != redis.ErrNil {
-			c.logf("cron: %v", errors.WithStack(err))
-		}
+	if err != nil && err != redis.ErrNil {
+		c.logf("cron: %v", err)
+		return
+	}
+	if !locked {
 		return
 	}
 	e.Job.Run()
@@ -287,7 +287,7 @@ func (c *Cron) run() {
 // Logs an error to stderr or to the configured error log
 func (c *Cron) logf(format string, args ...interface{}) {
 	if c.ErrorLog != nil {
-		c.ErrorLog.Printf(format, args...)
+		c.ErrorLog.Errorf(format, args...)
 	} else {
 		log.Printf(format, args...)
 	}
