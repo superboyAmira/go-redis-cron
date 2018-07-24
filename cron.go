@@ -9,9 +9,8 @@ import (
 	"sort"
 	"time"
 
-	"strings"
-
 	"github.com/garyburd/redigo/redis"
+	"github.com/pkg/errors"
 )
 
 type Logger interface {
@@ -219,8 +218,8 @@ func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
 	}()
 	locked, err := c.lock(start, next, e)
 	if err != nil || !locked {
-		if !strings.Contains(err.Error(), "nil returned") {
-			panic(err)
+		if err != redis.ErrNil {
+			c.logf("cron: %v", errors.WithStack(err))
 		}
 		return
 	}
