@@ -20,19 +20,21 @@ type Logger interface {
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries   []*Entry
-	stop      chan struct{}
-	add       chan *Entry
-	snapshot  chan []*Entry
-	running   bool
-	ErrorLog  Logger
-	location  *time.Location
-	pool      *redis.Pool
-	keyPrefix string
-	noRepeat  bool
+	entries    []*Entry
+	stop       chan struct{}
+	add        chan *Entry
+	snapshot   chan []*Entry
+	running    bool
+	ErrorLog   Logger
+	location   *time.Location
+	pool       *redis.Pool
+	keyPrefix  string
+	keyCleared string
+	noRepeat   bool
 }
 
 const DefaultKeyPrefix = "redis-cron"
+const DefaultKeyCleared = "redis-cleared"
 
 // Job is an interface for submitted cron jobs.
 type Job interface {
@@ -94,15 +96,16 @@ func New(pool *redis.Pool) *Cron {
 // NewWithLocation returns a new Cron job runner.
 func NewWithLocation(location *time.Location, pool *redis.Pool) *Cron {
 	return &Cron{
-		entries:   nil,
-		add:       make(chan *Entry),
-		stop:      make(chan struct{}),
-		snapshot:  make(chan []*Entry),
-		running:   false,
-		ErrorLog:  nil,
-		location:  location,
-		pool:      pool,
-		keyPrefix: DefaultKeyPrefix,
+		entries:    nil,
+		add:        make(chan *Entry),
+		stop:       make(chan struct{}),
+		snapshot:   make(chan []*Entry),
+		running:    false,
+		ErrorLog:   nil,
+		location:   location,
+		pool:       pool,
+		keyPrefix:  DefaultKeyPrefix,
+		keyCleared: DefaultKeyCleared,
 	}
 }
 
@@ -118,6 +121,10 @@ func (f FuncJob) Name() string {
 // SetKeyPrefix prepend a prefix to the key.
 func (c *Cron) SetKeyPrefix(prefix string) {
 	c.keyPrefix = prefix
+}
+
+func (c *Cron) SetDefaultClearedKey(keyCleared string) {
+	c.keyCleared = keyCleared
 }
 
 // SetNoRepeat set to run the job without repeating.
@@ -179,6 +186,7 @@ func (c *Cron) Start() {
 		c.logf("cron: panic clear job keys: %v", err)
 		return
 	}
+
 	c.running = true
 	go c.run()
 }
@@ -192,68 +200,53 @@ func (c *Cron) Run() {
 		c.logf("cron: panic clear job keys: %v", err)
 		return
 	}
+
 	c.running = true
 	c.run()
 }
 
-// Clear job runing keys
+// Clear job running keys
 func (c *Cron) clear() error {
-	runingKeys := make([]interface{}, 0, len(c.entries))
-	for _, e := range c.entries {
-		jobKey := c.constructKey(e)
-		runingKeys = append(runingKeys, jobRuningKey(jobKey))
-	}
 	conn := c.pool.Get()
 	defer conn.Close()
-	_, err := conn.Do("DEL", runingKeys...)
+	reply, err := redis.String(conn.Do("SET", c.keyCleared, 1, "NX", "EX", 180))
+	if err != nil && err != redis.ErrNil {
+		return err
+	}
+	if reply != "OK" {
+		return nil
+	}
+	runningKeys := make([]interface{}, 0, len(c.entries))
+	for _, e := range c.entries {
+		jobKey := c.constructKey(e)
+		runningKeys = append(runningKeys, jobRunningKey(jobKey))
+	}
+	_, err = conn.Do("DEL", runningKeys...)
 	return err
 }
 
-// check runing
-func (c *Cron) lock(jobKey string, start time.Time, next time.Time) (bool, error) {
-	jobRuning, err := c.jobRuning(jobKey)
-	if jobRuning || err != nil {
-		return false, err
-	}
+func (c *Cron) lock(conn redis.Conn, jobKey string, start time.Time, next time.Time) (bool, error) {
 	expireAfter := c.calcExpiry(start.In(c.location), next.In(c.location))
-	conn := c.pool.Get()
-	defer conn.Close()
 	reply, err := redis.String(conn.Do("SET", jobKey, 1, "NX", "PX", int(expireAfter)))
 	if reply != "OK" || err != nil {
 		return false, err
 	}
-	return c.jobStart(jobKey)
+	return c.jobStart(conn, jobKey)
 }
 
-// check job runing
-// prevent the last task being executed when this task starts
-func (c *Cron) jobRuning(jobKey string) (bool, error) {
-	if !c.noRepeat {
-		return false, nil
-	}
-	conn := c.pool.Get()
-	defer conn.Close()
-	reply, err := redis.Int(conn.Do("EXISTS", jobRuningKey(jobKey)))
-	return reply == 1 && err == nil, err
-}
-
-func (c *Cron) jobStart(jobKey string) (bool, error) {
+func (c *Cron) jobStart(conn redis.Conn, jobKey string) (bool, error) {
 	if !c.noRepeat {
 		return true, nil
 	}
-	conn := c.pool.Get()
-	defer conn.Close()
-	reply, err := redis.String(conn.Do("SET", jobRuningKey(jobKey), "1"))
+	reply, err := redis.String(conn.Do("SET", jobRunningKey(jobKey), 1, "NX"))
 	return reply == "OK" && err == nil, err
 }
 
-func (c *Cron) jobEnd(jobKey string) error {
+func (c *Cron) jobEnd(conn redis.Conn, jobKey string) error {
 	if !c.noRepeat {
 		return nil
 	}
-	conn := c.pool.Get()
-	defer conn.Close()
-	_, err := conn.Do("DEL", jobRuningKey(jobKey))
+	_, err := conn.Do("DEL", jobRunningKey(jobKey))
 	return err
 }
 
@@ -273,11 +266,21 @@ func (c *Cron) constructKey(entry *Entry) string {
 }
 
 func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
+	conn := c.pool.Get()
 	jobKey := c.constructKey(e)
+	locked, err := c.lock(conn, jobKey, start, next)
+	if err != nil && err != redis.ErrNil {
+		c.logf("cron: %v", err)
+		return
+	}
 	defer func() {
-		if err := c.jobEnd(jobKey); err != nil {
-			c.logf("cron: %v", err)
+		// end job when locked success
+		if locked {
+			if err := c.jobEnd(conn, jobKey); err != nil {
+				c.logf("cron: %v", err)
+			}
 		}
+		conn.Close()
 		if r := recover(); r != nil {
 			const size = 64 << 10
 			buf := make([]byte, size)
@@ -285,11 +288,6 @@ func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
 			c.logf("cron: panic running job: %v\n%s", r, buf)
 		}
 	}()
-	locked, err := c.lock(jobKey, start, next)
-	if err != nil && err != redis.ErrNil {
-		c.logf("cron: %v", err)
-		return
-	}
 	if !locked {
 		return
 	}
@@ -394,7 +392,7 @@ func (c *Cron) now() time.Time {
 	return time.Now().In(c.location)
 }
 
-func jobRuningKey(key string) string {
-	const suffix = "-runing"
+func jobRunningKey(key string) string {
+	const suffix = "-running"
 	return key + suffix
 }
