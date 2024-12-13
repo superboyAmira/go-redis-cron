@@ -158,7 +158,15 @@ func (c *Cron) schedule(schedule Schedule, cmd Job, spec string) {
 		c.entries = append(c.entries, entry)
 		return
 	}
-
+	// DEL running key when cron is running and set no repeat
+	if c.noRepeat {
+		conn := c.pool.Get()
+		defer conn.Close()
+		_, err := conn.Do("DEL", jobRunningKey(c.constructKey(entry)))
+		if err != nil {
+			c.logf("cron: panic clear job key when add job: %v", err)
+		}
+	}
 	c.add <- entry
 }
 
@@ -207,21 +215,17 @@ func (c *Cron) Run() {
 
 // Clear job running keys
 func (c *Cron) clear() error {
-	conn := c.pool.Get()
-	defer conn.Close()
-	reply, err := redis.String(conn.Do("SET", c.keyCleared, 1, "NX", "EX", 180))
-	if err != nil && err != redis.ErrNil {
-		return err
-	}
-	if reply != "OK" {
+	if len(c.entries) == 0 {
 		return nil
 	}
+	conn := c.pool.Get()
+	defer conn.Close()
 	runningKeys := make([]interface{}, 0, len(c.entries))
 	for _, e := range c.entries {
 		jobKey := c.constructKey(e)
 		runningKeys = append(runningKeys, jobRunningKey(jobKey))
 	}
-	_, err = conn.Do("DEL", runningKeys...)
+	_, err := conn.Do("DEL", runningKeys...)
 	return err
 }
 
