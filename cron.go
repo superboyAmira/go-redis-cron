@@ -20,21 +20,19 @@ type Logger interface {
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries    []*Entry
-	stop       chan struct{}
-	add        chan *Entry
-	snapshot   chan []*Entry
-	running    bool
-	ErrorLog   Logger
-	location   *time.Location
-	pool       *redis.Pool
-	keyPrefix  string
-	keyCleared string
-	noRepeat   bool
+	entries   []*Entry
+	stop      chan struct{}
+	add       chan *Entry
+	snapshot  chan []*Entry
+	running   bool
+	ErrorLog  Logger
+	location  *time.Location
+	pool      *redis.Pool
+	keyPrefix string
+	noRepeat  bool
 }
 
 const DefaultKeyPrefix = "redis-cron"
-const DefaultKeyCleared = "redis-cleared"
 
 // Job is an interface for submitted cron jobs.
 type Job interface {
@@ -96,16 +94,15 @@ func New(pool *redis.Pool) *Cron {
 // NewWithLocation returns a new Cron job runner.
 func NewWithLocation(location *time.Location, pool *redis.Pool) *Cron {
 	return &Cron{
-		entries:    nil,
-		add:        make(chan *Entry),
-		stop:       make(chan struct{}),
-		snapshot:   make(chan []*Entry),
-		running:    false,
-		ErrorLog:   nil,
-		location:   location,
-		pool:       pool,
-		keyPrefix:  DefaultKeyPrefix,
-		keyCleared: DefaultKeyCleared,
+		entries:   nil,
+		add:       make(chan *Entry),
+		stop:      make(chan struct{}),
+		snapshot:  make(chan []*Entry),
+		running:   false,
+		ErrorLog:  nil,
+		location:  location,
+		pool:      pool,
+		keyPrefix: DefaultKeyPrefix,
 	}
 }
 
@@ -121,10 +118,6 @@ func (f FuncJob) Name() string {
 // SetKeyPrefix prepend a prefix to the key.
 func (c *Cron) SetKeyPrefix(prefix string) {
 	c.keyPrefix = prefix
-}
-
-func (c *Cron) SetDefaultClearedKey(keyCleared string) {
-	c.keyCleared = keyCleared
 }
 
 // SetNoRepeat set to run the job without repeating.
