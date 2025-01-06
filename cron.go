@@ -235,7 +235,7 @@ func (c *Cron) jobStart(conn redis.Conn, jobKey string) (bool, error) {
 	if !c.noRepeat {
 		return true, nil
 	}
-	reply, err := redis.String(conn.Do("SET", jobRunningKey(jobKey), 1, "NX"))
+	reply, err := redis.String(conn.Do("SET", jobRunningKey(jobKey), time.Now().Unix(), "NX"))
 	return reply == "OK" && err == nil, err
 }
 
