@@ -1,4 +1,4 @@
-module go-redis-cron
+module github.com/superboyAmira/go-redis-cron
 
 go 1.23.4
 
