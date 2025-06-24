@@ -1,15 +1,17 @@
 package cron
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"log"
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"time"
 
-	"github.com/garyburd/redigo/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 type Logger interface {
@@ -27,9 +29,11 @@ type Cron struct {
 	running   bool
 	ErrorLog  Logger
 	location  *time.Location
-	pool      *redis.Pool
+	pool      *redis.Client
 	keyPrefix string
 	noRepeat  bool
+
+	ctx context.Context
 }
 
 const DefaultKeyPrefix = "redis-cron"
@@ -87,12 +91,12 @@ func (s byTime) Less(i, j int) bool {
 }
 
 // New returns a new Cron job runner, in the Local time zone.
-func New(pool *redis.Pool) *Cron {
-	return NewWithLocation(time.Now().Location(), pool)
+func New(ctx context.Context, pool *redis.Client) *Cron {
+	return NewWithLocation(ctx, time.Now().Location(), pool)
 }
 
 // NewWithLocation returns a new Cron job runner.
-func NewWithLocation(location *time.Location, pool *redis.Pool) *Cron {
+func NewWithLocation(ctx context.Context, location *time.Location, pool *redis.Client) *Cron {
 	return &Cron{
 		entries:   nil,
 		add:       make(chan *Entry),
@@ -103,6 +107,8 @@ func NewWithLocation(location *time.Location, pool *redis.Pool) *Cron {
 		location:  location,
 		pool:      pool,
 		keyPrefix: DefaultKeyPrefix,
+
+		ctx: ctx,
 	}
 }
 
@@ -153,10 +159,7 @@ func (c *Cron) schedule(schedule Schedule, cmd Job, spec string) {
 	}
 	// DEL running key when cron is running and set no repeat
 	if c.noRepeat {
-		conn := c.pool.Get()
-		defer conn.Close()
-		_, err := conn.Do("DEL", jobRunningKey(c.constructKey(entry)))
-		if err != nil {
+		if err := c.pool.Del(c.ctx, jobRunningKey(c.constructKey(entry))).Err(); err != nil {
 			c.logf("cron: panic clear job key when add job: %v", err)
 		}
 	}
@@ -211,50 +214,58 @@ func (c *Cron) clear() error {
 	if len(c.entries) == 0 {
 		return nil
 	}
-	conn := c.pool.Get()
-	defer conn.Close()
-	runningKeys := make([]interface{}, 0, len(c.entries))
+	runningKeys := make([]string, 0, len(c.entries))
 	for _, e := range c.entries {
 		jobKey := c.constructKey(e)
 		runningKeys = append(runningKeys, jobRunningKey(jobKey))
 	}
-	_, err := conn.Do("DEL", runningKeys...)
-	return err
+	return c.pool.Del(c.ctx, runningKeys...).Err()
 }
 
-func (c *Cron) lock(conn redis.Conn, jobKey string, start time.Time, next time.Time) (bool, error) {
+func (c *Cron) lock(jobKey string, start time.Time, next time.Time) (bool, error) {
 	expireAfter := c.calcExpiry(start.In(c.location), next.In(c.location))
-	reply, err := redis.String(conn.Do("SET", jobKey, 1, "NX", "PX", int(expireAfter)))
-	if reply != "OK" || err != nil {
+	reply, err := c.pool.SetNX(c.ctx, jobKey, 1, expireAfter).Result()
+
+	if err != nil {
 		return false, err
 	}
-	return c.jobStart(conn, jobKey)
+	if !reply {
+		return false, nil
+	}
+	return c.jobStart(c.ctx, jobKey)
 }
 
-func (c *Cron) jobStart(conn redis.Conn, jobKey string) (bool, error) {
+func (c *Cron) jobStart(ctx context.Context, jobKey string) (bool, error) {
 	if !c.noRepeat {
 		return true, nil
 	}
-	reply, err := redis.String(conn.Do("SET", jobRunningKey(jobKey), time.Now().Unix(), "NX"))
-	return reply == "OK" && err == nil, err
+
+	jobRunningKey := jobRunningKey(jobKey)
+
+	reply, err := c.pool.SetNX(ctx, jobRunningKey, strconv.FormatInt(time.Now().Unix(), 10), 0).Result()
+	if err != nil {
+		return false, err
+	}
+
+	return reply, nil
 }
 
-func (c *Cron) jobEnd(conn redis.Conn, jobKey string) error {
+func (c *Cron) jobEnd(ctx context.Context, jobKey string) error {
 	if !c.noRepeat {
 		return nil
 	}
-	_, err := conn.Do("DEL", jobRunningKey(jobKey))
+
+	jobRunningKey := jobRunningKey(jobKey)
+
+	err := c.pool.Del(ctx, jobRunningKey).Err()
 	return err
 }
 
-// in millisecond
-func (c *Cron) calcExpiry(now time.Time, next time.Time) int64 {
-	nowUnix := now.UnixNano()
-	nextUnix := next.UnixNano()
-	expiry := ((nextUnix - nowUnix) / 2) / 1e6
+func (c *Cron) calcExpiry(now time.Time, next time.Time) time.Duration {
+	duration := next.Sub(now)
+	expiry := duration / 2
 	return expiry
 }
-
 func (c *Cron) constructKey(entry *Entry) string {
 	h := sha1.New()
 	h.Write([]byte(c.keyPrefix + entry.Job.Name() + entry.Spec))
@@ -263,21 +274,19 @@ func (c *Cron) constructKey(entry *Entry) string {
 }
 
 func (c *Cron) runWithRecovery(e *Entry, start time.Time, next time.Time) {
-	conn := c.pool.Get()
 	jobKey := c.constructKey(e)
-	locked, err := c.lock(conn, jobKey, start, next)
-	if err != nil && err != redis.ErrNil {
+	locked, err := c.lock(jobKey, start, next)
+	if err != nil && err != redis.Nil {
 		c.logf("cron: %v", err)
 		return
 	}
 	defer func() {
 		// end job when locked success
 		if locked {
-			if err := c.jobEnd(conn, jobKey); err != nil {
+			if err := c.jobEnd(c.ctx, jobKey); err != nil {
 				c.logf("cron: %v", err)
 			}
 		}
-		conn.Close()
 		if r := recover(); r != nil {
 			const size = 64 << 10
 			buf := make([]byte, size)
